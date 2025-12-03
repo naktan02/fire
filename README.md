@@ -12,6 +12,7 @@
 ## 실행 방법
 
 1. `uv` 설치 (아직 설치하지 않은 경우).
+   pip install uv
 2. 프로젝트 실행:
    ```bash
    uv run src/main.py

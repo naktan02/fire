@@ -10,7 +10,7 @@ GRID_SIZE = 20
 def main():
     # 카메라 초기화
     try:
-        cam = Camera(0)
+        cam = Camera(1)
     except ValueError:
         print("카메라를 찾을 수 없습니다. 종료합니다.")
         return

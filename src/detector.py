@@ -1,3 +1,4 @@
+# detector.py
 import cv2
 import numpy as np
 
@@ -6,65 +7,76 @@ class Detector:
         pass
 
     # -------------------------
-    # 1) 맵 코너(파란색) 검출
+    # 1) 맵 코너(종이 모서리) 검출
     # -------------------------
     def detect_corners(self, frame):
         """
-        맵의 4개 모서리(파란색)를 감지합니다.
-        :param frame: 입력 이미지 프레임.
+        화면 속 '종이'의 4개 모서리를 감지합니다.
+        (문서 스캐너처럼 가장 큰 사각형 컨투어를 찾는 방식)
+
+        :param frame: 입력 이미지 프레임 (BGR)
         :return: (corners, mask)
                  corners: 4x1x2 float32 (TL, TR, BR, BL) 또는 None
-                 mask: 파란색 마스크 (디버깅용)
+                 mask: 엣지/컨투어 마스크 (디버깅용)
         """
-        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        # 1. 그레이 + 블러
+        img_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        img_blur = cv2.GaussianBlur(img_gray, (5, 5), 1)
 
-        # 파란색 범위 (조금 좁게)
-        lower_blue = np.array([90, 50, 50])
-        upper_blue = np.array([140, 255, 255])
-        mask = cv2.inRange(hsv, lower_blue, upper_blue)
+        # 2. Canny 엣지
+        edges = cv2.Canny(img_blur, 80, 200)
 
+        # 3. 팽창/침식으로 엣지 두껍게
         kernel = np.ones((5, 5), np.uint8)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+        img_dilate = cv2.dilate(edges, kernel, iterations=2)
+        img_thresh = cv2.erode(img_dilate, kernel, iterations=1)
 
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        if len(contours) < 4:
-            return None, mask
+        # 4. 외곽선 찾기
+        contours, _ = cv2.findContours(
+            img_thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
 
-        # 면적 기준 상위 4개만 사용 (너무 작은 점 제거)
-        contours = sorted(contours, key=cv2.contourArea, reverse=True)[:4]
+        if not contours:
+            return None, img_thresh
 
-        pts = []
-        for c in contours:
-            area = cv2.contourArea(c)
-            if area < 100:  # 너무 작은 건 무시
+        # 5. 가장 큰 사각형 컨투어 하나 선택
+        biggest = None
+        max_area = 0
+
+        for cnt in contours:
+            area = cv2.contourArea(cnt)
+            # 너무 작은 잡음은 제외 (영상 크기에 따라 조절)
+            if area < 5000:
                 continue
-            M = cv2.moments(c)
-            if M['m00'] == 0:
-                continue
-            cx = M['m10'] / M['m00']
-            cy = M['m01'] / M['m00']
-            pts.append([cx, cy])
 
-        if len(pts) != 4:
-            return None, mask
+            peri = cv2.arcLength(cnt, True)
+            approx = cv2.approxPolyDP(cnt, 0.02 * peri, True)
 
-        pts = np.array(pts, dtype=np.float32)
+            # 꼭짓점이 4개인 큰 컨투어만 후보
+            if len(approx) == 4 and area > max_area:
+                biggest = approx
+                max_area = area
 
-        # (x + y)가 가장 작은 점 -> TL
-        # (x - y)가 가장 큰 점 -> TR
-        # (x + y)가 가장 큰 점 -> BR
-        # (x - y)가 가장 작은 점 -> BL
+        if biggest is None:
+            return None, img_thresh
+
+        # 6. 점 순서 정렬 (TL, TR, BR, BL)
+        pts = biggest.reshape(4, 2).astype(np.float32)
+
+        # (x + y)가 가장 작은 -> TL
+        # (x - y)가 가장 작은 -> TR? (블로그 코드랑 맞추기 위해 아래 방식 사용)
         s = pts.sum(axis=1)
         diff = np.diff(pts, axis=1).reshape(-1)
 
         tl = pts[np.argmin(s)]
         br = pts[np.argmax(s)]
-        tr = pts[np.argmax(diff)]
-        bl = pts[np.argmin(diff)]
+        tr = pts[np.argmin(diff)]
+        bl = pts[np.argmax(diff)]
 
         corners = np.array([tl, tr, br, bl], dtype=np.float32).reshape(-1, 1, 2)
-        return corners, mask
+
+        # 디버깅용 mask는 엣지/threshold 결과를 그대로 사용
+        return corners, img_thresh
 
     # -------------------------
     # 2) 투시 변환
@@ -81,7 +93,6 @@ class Detector:
         if corners is None or len(corners) != 4:
             return None
 
-        # 목적지 좌표 (직사각형)
         dst = np.array([
             [0, 0],
             [width - 1, 0],
@@ -96,17 +107,11 @@ class Detector:
         return warped
 
     # -------------------------
-    # 3) 불(빨간색) 감지
+    # 3) 불(빨간색) 감지 
     # -------------------------
     def detect_fire(self, frame):
-        """
-        빨간색으로 표시된 '불' 위치를 감지합니다.
-        :param frame: 입력 이미지 (warp 후 맵 기준).
-        :return: (bounding_boxes, mask)
-        """
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
 
-        # 빨간색은 두 구간으로 나눠 잡기
         lower_red1 = np.array([0, 100, 100])
         upper_red1 = np.array([10, 255, 255])
         lower_red2 = np.array([160, 100, 100])
@@ -135,16 +140,10 @@ class Detector:
     # 4) 탈출구(검은색) 감지
     # -------------------------
     def detect_exit(self, frame):
-        """
-        검은색으로 표시된 탈출구를 감지합니다.
-        :param frame: 입력 이미지 (warp 후 맵 기준).
-        :return: (bounding_boxes, mask)
-        """
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
 
-        # 검은색은 밝기(V)가 낮은 영역
         lower_black = np.array([0, 0, 0])
-        upper_black = np.array([180, 255, 60])  # V <= 60 정도
+        upper_black = np.array([180, 255, 60])
         mask = cv2.inRange(hsv, lower_black, upper_black)
 
         kernel = np.ones((3, 3), np.uint8)
