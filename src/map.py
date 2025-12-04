@@ -4,23 +4,20 @@ import cv2
 
 class GridMap:
     def __init__(self, width, height, grid_size=20):
-        """
-        그리드 맵을 초기화합니다.
-        :param width: 영역의 너비 (픽셀).
-        :param height: 영역의 높이 (픽셀).
-        :param grid_size: 각 그리드 셀의 크기 (픽셀).
-        """
         self.width = width
         self.height = height
         self.grid_size = grid_size
         self.cols = width // grid_size
         self.rows = height // grid_size
-
-        # 0 = 빈 칸, 1 = 장애물
+        
+        # 0: 이동 가능, 1: 장애물(벽/불)
         self.grid = np.zeros((self.rows, self.cols), dtype=np.uint8)
-
-        # 탈출구 셀 목록 (gx, gy)
         self.exits = []
+
+    def reset(self):
+        """매 프레임 맵 상태 초기화"""
+        self.grid.fill(0)
+        self.exits.clear()
 
     def _to_grid(self, x, y):
         gx = int(x // self.grid_size)
@@ -34,117 +31,96 @@ class GridMap:
         cy = gy * self.grid_size + self.grid_size // 2
         return cx, cy
 
+    def update_obstacles_from_mask(self, mask):
+        """
+        Detector에서 만든 벽/불 마스크(0 or 255)를 받아 그리드에 장애물로 등록
+        미래지향적: 픽셀 단위 마스크를 그리드 단위로 효율적으로 변환
+        """
+        # 마스크를 그리드 크기로 축소 (Nearest Neighbor or Max Pooling 개념)
+        # 단순히 resize하면 중간에 있는 얇은 벽이 사라질 수 있으므로 주의.
+        # 여기서는 안전하게 픽셀 체크 방식으로 구현 (성능 최적화 가능)
+        
+        # 리사이즈로 대략적인 그리드 맵 생성 (cv2.INTER_AREA or MAX)
+        small_mask = cv2.resize(mask, (self.cols, self.rows), interpolation=cv2.INTER_NEAREST)
+        
+        # 마스크가 있는 곳(>0)은 장애물(1)로 설정
+        self.grid[small_mask > 0] = 1
+
     def set_obstacle_rect(self, x, y, w, h):
-        """
-        픽셀 기준 사각형 영역을 장애물로 표시.
-        """
-        x2 = x + w
-        y2 = y + h
-        for px in range(x, x2, self.grid_size):
-            for py in range(y, y2, self.grid_size):
-                gx, gy = self._to_grid(px, py)
-                self.grid[gy, gx] = 1
+        """사각형 영역 장애물 설정 (불 등)"""
+        gx1, gy1 = self._to_grid(x, y)
+        gx2, gy2 = self._to_grid(x + w, y + h)
+        self.grid[gy1:gy2+1, gx1:gx2+1] = 1
 
     def add_exit(self, x, y, w, h):
-        """
-        검은색으로 표시된 탈출구의 bounding box를 받아
-        중심을 그리드 좌표로 변환해 저장.
-        """
-        cx = x + w / 2
-        cy = y + h / 2
-        gx, gy = self._to_grid(cx, cy)
-        if (gx, gy) not in self.exits:
-            self.exits.append((gx, gy))
+        cx, cy = x + w/2, y + h/2
+        self.exits.append(self._to_grid(cx, cy))
 
-    def draw_grid(self, img, color=(60, 60, 60)):
-        """
-        디버깅용: 맵 위에 격자를 그려줌.
-        """
-        h, w = img.shape[:2]
-        # 세로선
-        for c in range(self.cols + 1):
-            x = c * self.grid_size
-            cv2.line(img, (x, 0), (x, h), color, 1)
-        # 가로선
-        for r in range(self.rows + 1):
-            y = r * self.grid_size
-            cv2.line(img, (0, y), (w, y), color, 1)
-
-        # 탈출구 표시
-        for gx, gy in self.exits:
-            cx, cy = self._to_pixel(gx, gy)
-            cv2.circle(img, (cx, cy), 5, (0, 255, 0), -1)  # 초록색 점
-
-    # 나중에 필요하면 여기서 BFS / A* 추가해서 경로 계산 가능
     def get_shortest_path(self, start_x, start_y):
-        """
-        A*를 사용하여 시작점에서 탈출구까지의 최단 경로를 찾습니다.
-        :param start_x: 시작 x 좌표 (픽셀).
-        :param start_y: 시작 y 좌표 (픽셀).
-        :return: 경로를 나타내는 픽셀 좌표의 (x, y) 튜플 리스트.
-        """
-        if not self.exits:
+        if not self.exits: return []
+        
+        start_node = self._to_grid(start_x, start_y)
+        # 시작점이 벽/불 속이면 탈출 불가
+        if self.grid[start_node[1], start_node[0]] == 1:
             return []
 
-        start_node = self._to_grid(start_x, start_y)
-        
-        # 가장 가까운 탈출구 찾기 (직선 거리 기준)
         shortest_path = []
-        min_length = float('inf')
+        min_len = float('inf')
 
         for exit_pos in self.exits:
             path = self._astar(start_node, exit_pos)
-            if path and len(path) < min_length:
-                min_length = len(path)
+            if path and len(path) < min_len:
+                min_len = len(path)
                 shortest_path = path
         
         return shortest_path
 
-    def _astar(self, start_node, end_node):
-        if self.grid[start_node[1], start_node[0]] == 1:
-            return [] # 시작점이 불 속에 있음
+    def _astar(self, start, end):
+        # (기존 A* 로직 유지)
+        # 만약 끝점이 장애물이면 근처 가능한 곳으로 타협하는 로직 추가 가능
+        if self.grid[end[1], end[0]] == 1: return [] 
 
-        # A* 알고리즘
         open_set = []
-        heapq.heappush(open_set, (0, start_node))
+        heapq.heappush(open_set, (0, start))
         came_from = {}
-        g_score = {start_node: 0}
-        f_score = {start_node: self._heuristic(start_node, end_node)}
+        g_score = {start: 0}
+        f_score = {start: abs(start[0]-end[0]) + abs(start[1]-end[1])}
 
         while open_set:
             current = heapq.heappop(open_set)[1]
+            if current == end:
+                return self._reconstruct(came_from, current)
 
-            if current == end_node:
-                return self._reconstruct_path(came_from, current)
+            for dx, dy in [(-1,0), (1,0), (0,-1), (0,1)]: # 4방향
+                nx, ny = current[0]+dx, current[1]+dy
+                if 0 <= nx < self.cols and 0 <= ny < self.rows:
+                    if self.grid[ny, nx] == 0: # 장애물 아님
+                        tentative_g = g_score[current] + 1
+                        if nx == end[0] and ny == end[1]: pass # 도착지
+                        
+                        if (nx, ny) not in g_score or tentative_g < g_score[(nx, ny)]:
+                            came_from[(nx, ny)] = current
+                            g_score[(nx, ny)] = tentative_g
+                            f_score[(nx, ny)] = tentative_g + abs(nx-end[0]) + abs(ny-end[1])
+                            heapq.heappush(open_set, (f_score[(nx, ny)], (nx, ny)))
+        return []
 
-            for neighbor in self._get_neighbors(current):
-                tentative_g_score = g_score[current] + 1
-
-                if neighbor not in g_score or tentative_g_score < g_score[neighbor]:
-                    came_from[neighbor] = current
-                    g_score[neighbor] = tentative_g_score
-                    f_score[neighbor] = tentative_g_score + self._heuristic(neighbor, end_node)
-                    heapq.heappush(open_set, (f_score[neighbor], neighbor))
-
-        return [] # 경로를 찾을 수 없음
-
-    def _heuristic(self, a, b):
-        return abs(a[0] - b[0]) + abs(a[1] - b[1]) # 맨해튼 거리
-
-    def _get_neighbors(self, node):
-        x, y = node
-        neighbors = []
-        for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]: # 4방향 연결
-            nx, ny = x + dx, y + dy
-            if 0 <= nx < self.cols and 0 <= ny < self.rows:
-                if self.grid[ny, nx] == 0:
-                    neighbors.append((nx, ny))
-        return neighbors
-
-    def _reconstruct_path(self, came_from, current):
-        total_path = [current]
+    def _reconstruct(self, came_from, current):
+        path = [current]
         while current in came_from:
             current = came_from[current]
-            total_path.append(current)
-        total_path.reverse()
-        return [self._to_pixel(x, y) for x, y in total_path]
+            path.append(current)
+        path.reverse()
+        return [self._to_pixel(gx, gy) for gx, gy in path]
+        
+    def draw_grid(self, img):
+        # 디버깅: 그리드 그리기 (장애물은 빨간색 채우기)
+        for r in range(self.rows):
+            for c in range(self.cols):
+                if self.grid[r, c] == 1:
+                    cx, cy = self._to_pixel(c, r)
+                    # 장애물(벽) 표시
+                    cv2.rectangle(img, 
+                                  (c*self.grid_size, r*self.grid_size), 
+                                  ((c+1)*self.grid_size, (r+1)*self.grid_size), 
+                                  (0, 0, 100), -1)

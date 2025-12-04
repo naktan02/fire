@@ -4,181 +4,125 @@ from camera import Camera
 from detector import Detector
 from map import GridMap
 
-MAP_W, MAP_H = 600, 600
+# === 설정 영역 (CONFIGURATION) ===
+MAP_WIDTH = 860
+MAP_HEIGHT = 520
 GRID_SIZE = 20
 
+# 2단계에서 얻은 좌표를 여기에 붙여넣으세요
+# 예: FIXED_DOT_POSITIONS = [(123, 456), (50, 50)]
+FIXED_DOT_POSITIONS = [
+]
+FIXED_EXIT_POSITIONS = [
+]
 def main():
-    # 카메라 초기화
+    # [수정됨] 라즈베리파이 MJPG-Streamer 주소 입력
+    # 주의: 뒤에 /?action=stream 까지 정확히 적어야 함
+    STREAM_URL = "http://10.8.0.2:8080/?action=stream"
+
     try:
-        cam = Camera(1)
-    except ValueError:
-        print("카메라를 찾을 수 없습니다. 종료합니다.")
+        print(f"Connecting to {STREAM_URL}...")
+        cam = Camera(STREAM_URL) 
+    except Exception as e:
+        print(f"Error: {e}")
         return
 
     detector = Detector()
+    # 맵 객체는 Warp가 성공했을 때 초기화됩니다.
+    grid_map = GridMap(MAP_WIDTH, MAP_HEIGHT, GRID_SIZE)
     last_valid_corners = None
-    grid_map = None
-
-    # 시뮬레이션된 도트 매트릭스 위치 (상대 좌표 0.0 ~ 1.0)
-    dot_matrices_rel = [
-        (0.2, 0.2), (0.5, 0.2), (0.8, 0.2),
-        (0.2, 0.5),             (0.8, 0.5),
-        (0.2, 0.8), (0.5, 0.8), (0.8, 0.8)
-    ]
-
-    show_debug_masks = False  # d 키로 토글
-    print("q: 종료, r: 맵 리셋, d: 디버그 마스크 토글")
+    
+    print("=== Fire Evacuation System Started ===")
+    print(f"Target Nodes: {len(FIXED_DOT_POSITIONS)}")
 
     while True:
         ret, frame = cam.get_frame()
-        if not ret:
-            print("카메라 프레임을 가져올 수 없습니다.")
-            break
-
-        # 크기 통일
+        if not ret: break
+        
+        # 원활한 처리를 위해 해상도 고정
         frame = cv2.resize(frame, (640, 480))
-        # 원본에 코너/사각형을 그려줄 복사본
-        orig_vis = frame.copy()
+        display_frame = frame.copy()
 
-        # ---- 1. 코너 검출 ----
-        corners, corner_mask = detector.detect_corners(frame)
-
-        # 유효한 코너라면 마지막 값 업데이트
-        final_corners = None
+        # 1. 맵 외곽선(종이 테두리) 인식
+        corners, _ = detector.detect_corners(frame)
         if corners is not None:
             area = cv2.contourArea(corners)
-            frame_area = frame.shape[0] * frame.shape[1]
-            if area > frame_area * 0.05:   # 화면의 5% 이상일 때만 유효
+            if area > (frame.shape[0]*frame.shape[1] * 0.1): # 화면의 10% 이상일 때만
                 last_valid_corners = corners
 
+        # 2. 맵 투시 변환 (Top-down View)
+        warped_map = None
         if last_valid_corners is not None:
-            final_corners = last_valid_corners.copy()
-
-        # ---- 2. 투시 변환 or 원본 사용 ----
-        warped = None
-        if final_corners is not None:
-            warped_tmp = detector.warp_perspective(frame, final_corners, MAP_W, MAP_H)
-            if warped_tmp is not None and warped_tmp.size > 0:
-                # 완전 까만 화면인지 체크 (디버깅용)
-                if np.mean(warped_tmp) > 1:   # 평균이 0 근처면 거의 검정
-                    warped = warped_tmp
-
-            # 원본에 코너와 사각형 그리기 (어디를 맵으로 쓰는지 보이게)
-            pts = final_corners.reshape(-1, 2).astype(int)
-            for p in pts:
-                cv2.circle(orig_vis, (p[0], p[1]), 6, (255, 0, 0), -1)
-            cv2.polylines(orig_vis, [pts], True, (0, 255, 255), 2)
-
-        # 디버깅을 위해: warped가 없으면 원본 그대로 사용
-        if warped is None:
-            process_frame = frame.copy()
-            warp_raw = None
-            using_warp = False
-        else:
-            process_frame = warped
-            warp_raw = warped.copy()   # 격자 그리기 전 원본 warp 결과
-            using_warp = True
-
-        # ---- 3. 맵 객체 준비 (warp 기준) ----
-        if using_warp:
-            if grid_map is None:
-                grid_map = GridMap(MAP_W, MAP_H, grid_size=GRID_SIZE)
-        else:
-            grid_map = None  # warp 안 쓰면 맵도 리셋
-
-        # ---- 4. 불 / 탈출구 감지 ----
-        fire_boxes, fire_mask = detector.detect_fire(process_frame)
-        exit_boxes, exit_mask = detector.detect_exit(process_frame)
-
-        # 탈출구를 그리드에 추가
-        if grid_map is not None:
-            grid_map.exits.clear()
-            for (x, y, w, h) in exit_boxes:
-                grid_map.add_exit(x, y, w, h)
-
-        # ---- 5. 시각화 (process_frame 위에 그리기) ----
-        vis = process_frame.copy()
-
-        # 불 영역 표시 (빨간 박스)
-        for (x, y, w, h) in fire_boxes:
-            cv2.rectangle(vis, (x, y), (x + w, y + h), (0, 0, 255), 2)
-
-        # 탈출구 영역 표시 (초록 박스)
-        for (x, y, w, h) in exit_boxes:
-            cv2.rectangle(vis, (x, y), (x + w, y + h), (0, 255, 0), 2)
-
-        # 격자 + 탈출구 점 표시 (warp 사용 시)
-        if grid_map is not None and using_warp:
-            grid_map.draw_grid(vis)
+            warped_map = detector.warp_perspective(frame, last_valid_corners, MAP_WIDTH, MAP_HEIGHT)
+        
+        if warped_map is not None:
+            # === [핵심 로직] 맵 분석 및 경로 계산 ===
             
-            # 도트 매트릭스 및 경로 시각화
-            for (rel_x, rel_y) in dot_matrices_rel:
-                # 상대 좌표를 절대 좌표로 변환
-                dm_x = int(rel_x * MAP_W)
-                dm_y = int(rel_y * MAP_H)
+            # (A) 맵 초기화
+            grid_map.reset()
+            
+            # (B) 내부 흰색 벽 인식 -> 장애물 등록
+            wall_mask = detector.detect_walls_in_map(warped_map)
+            grid_map.update_obstacles_from_mask(wall_mask)
+            
+            # (C) 불(양초) 인식 -> 장애물 등록
+            fire_boxes, fire_mask = detector.detect_fire(warped_map)
+            for (fx, fy, fw, fh) in fire_boxes:
+                # 불 주변을 넉넉하게 위험지역으로 설정 (안전 마진)
+                grid_map.set_obstacle_rect(fx-10, fy-10, fw+20, fh+20)
+                # 시각화
+                cv2.rectangle(warped_map, (fx, fy), (fx+fw, fy+fh), (0, 0, 255), 2)
+                cv2.putText(warped_map, "FIRE", (fx, fy-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,255), 2)
+
+            # (D) 탈출구 처리
+            # grid_map.reset()에서 이미 self.exits는 비워진 상태라고 가정
+            for (ex, ey) in FIXED_EXIT_POSITIONS:
+                w, h = 40, 40
+                grid_map.add_exit(ex - w/2, ey - h/2, w, h)
+
+                cv2.circle(warped_map, (ex, ey), 10, (0, 0, 0), -1)
+                cv2.putText(
+                    warped_map, "EXIT",
+                    (ex - 20, ey - 15),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                    (255, 255, 255), 1
+                )
+
+            # (E) 각 도트 매트릭스 위치별 최단 경로 계산
+            # 디버깅용 그리드 그리기 (장애물 확인)
+            # grid_map.draw_grid(warped_map) 
+
+            for i, (dm_x, dm_y) in enumerate(FIXED_DOT_POSITIONS):
+                # 위치 표시
+                cv2.circle(warped_map, (dm_x, dm_y), 5, (255, 255, 0), -1)
                 
-                # 도트 매트릭스 위치 그리기 (노란색 점)
-                cv2.circle(vis, (dm_x, dm_y), 8, (0, 255, 255), -1)
-                
-                # 최단 경로 계산
+                # 경로 계산
                 path = grid_map.get_shortest_path(dm_x, dm_y)
                 
                 if len(path) > 1:
-                    # 경로 그리기 (파란색 선)
-                    for j in range(len(path) - 1):
-                        cv2.line(vis, path[j], path[j+1], (255, 0, 0), 2)
+                    # 경로 그리기 (파란색)
+                    cv2.polylines(warped_map, [np.array(path)], False, (255, 0, 0), 2)
                     
-                    # 화살표 방향 결정 (다음 단계)
-                    next_step = path[1]
-                    direction_vector = (next_step[0] - dm_x, next_step[1] - dm_y)
+                    # 방향 화살표 (현재 위치에서 경로의 10% 지점 혹은 3번째 점을 향하도록)
+                    lookahead_idx = min(3, len(path)-1)
+                    target_pt = path[lookahead_idx]
                     
-                    # 화살표 그리기
-                    mag = np.sqrt(direction_vector[0]**2 + direction_vector[1]**2)
-                    if mag > 0:
-                        end_point = (int(dm_x + direction_vector[0]/mag * 40), int(dm_y + direction_vector[1]/mag * 40))
-                        cv2.arrowedLine(vis, (dm_x, dm_y), end_point, (0, 255, 255), 3)
+                    cv2.arrowedLine(warped_map, (dm_x, dm_y), target_pt, (0, 255, 255), 3, tipLength=0.3)
                 else:
-                    # 경로를 찾을 수 없음 (빨간 X)
-                    cv2.putText(vis, "X", (dm_x, dm_y), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+                    # 갈 수 없음 (고립됨)
+                    cv2.putText(warped_map, "X", (dm_x, dm_y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,255), 1)
 
-        # ---- 6. 창 여러 개 띄우기 ----
-        cv2.imshow('Original', orig_vis)                     # 코너/사각형 표시된 원본
-        cv2.imshow('Processed (Warped or Original)', vis)    # warp + 격자/박스
-        if warp_raw is not None:
-            cv2.imshow('WarpedRaw', warp_raw)                # 격자 그리기 전 순수 warp
+            # 결과 화면 출력
+            cv2.imshow("Smart Evacuation Map", warped_map)
 
-        if show_debug_masks:
-            corner_m = corner_mask if corner_mask is not None else np.zeros(frame.shape[:2], dtype=np.uint8)
-            fire_m = fire_mask if fire_mask is not None else np.zeros(process_frame.shape[:2], dtype=np.uint8)
-            exit_m = exit_mask if exit_mask is not None else np.zeros(process_frame.shape[:2], dtype=np.uint8)
+        # 원본 화면도 같이 표시 (카메라 조정용)
+        if last_valid_corners is not None:
+            cv2.polylines(display_frame, [last_valid_corners.astype(int)], True, (0, 255, 255), 2)
+        cv2.imshow("Original Camera", display_frame)
 
-            fire_m_resized = cv2.resize(fire_m, (corner_m.shape[1], corner_m.shape[0]))
-            exit_m_resized = cv2.resize(exit_m, (corner_m.shape[1], corner_m.shape[0]))
-
-            debug_mask = np.hstack([
-                corner_m,
-                fire_m_resized,
-                exit_m_resized
-            ])
-            cv2.imshow('Debug Masks (Blue / Red / Black)', debug_mask)
-        else:
-            try:
-                if cv2.getWindowProperty('Debug Masks (Blue / Red / Black)', 0) >= 0:
-                    cv2.destroyWindow('Debug Masks (Blue / Red / Black)')
-            except:
-                pass
-
-        # ---- 7. 키 입력 처리 ----
         key = cv2.waitKey(1) & 0xFF
-        if key == ord('q') or key == 27:  # q 또는 ESC
+        if key == ord('q'):
             break
-        elif key == ord('r'):
-            last_valid_corners = None
-            grid_map = None
-            print("Map reset.")
-        elif key == ord('d'):
-            show_debug_masks = not show_debug_masks
-            print("Debug masks:", "ON" if show_debug_masks else "OFF")
 
     cam.release()
     cv2.destroyAllWindows()
