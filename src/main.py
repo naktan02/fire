@@ -30,8 +30,8 @@ FIXED_EXIT_POSITIONS = [
 def main():
     # 1. 모듈 초기화
     try:
-        # STREAM_URL = "http://10.8.0.2:8080/?action=stream"
-        STREAM_URL = 1  # 테스트용 로컬 카메라
+        STREAM_URL = "http://10.8.0.3:8080/?action=stream"
+        # STREAM_URL = 1  # 테스트용 로컬 카메라
         print(f"Connecting to {STREAM_URL}...")
         cam = Camera(STREAM_URL)
     except Exception as e:
