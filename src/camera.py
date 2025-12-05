@@ -1,7 +1,7 @@
 import cv2
 
 class Camera:
-    def __init__(self, source=0):
+    def __init__(self, source=1):
         """
         카메라를 초기화합니다.
         :param source: 카메라 인덱스(0) 또는 스트림 URL(문자열).

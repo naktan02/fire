@@ -11,42 +11,59 @@ class Detector:
 
     def detect_corners(self, frame):
         """
-        검은 배경에서 가장 큰 흰색/밝은 영역(전체 맵 테두리)을 찾거나,
-        또는 검은 바닥과 대비되는 사각형 영역을 찾습니다.
-        (기존 코드 유지 및 보완)
+        [최적화됨] HSV + 침식 연산으로 그림자 제거 및 사각형 검출 강화
         """
-        img_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        img_blur = cv2.GaussianBlur(img_gray, (5, 5), 1)
-        edges = cv2.Canny(img_blur, 50, 150) # Canny 임계값 조정
+        # 1. 노이즈를 줄이기 위해 블러 처리
+        img_blur = cv2.GaussianBlur(frame, (5, 5), 0)
+        
+        # 2. BGR -> HSV 변환
+        hsv = cv2.cvtColor(img_blur, cv2.COLOR_BGR2HSV)
+        
+        # [수정 1] 그림자 제거를 위해 밝기(맨 뒤 숫자)를 60 -> 30으로 대폭 낮춤
+        lower_black = np.array([0, 0, 0])
+        upper_black = np.array([180, 255, 30]) 
+        
+        mask = cv2.inRange(hsv, lower_black, upper_black)
 
-        # 팽창 연산으로 끊어진 선 연결
+        # [수정 2] 침식(Erode) 연산 추가: 흰색 영역을 깎아내서 테두리와 분리시킴 (매우 중요!)
         kernel = np.ones((5, 5), np.uint8)
-        img_dilate = cv2.dilate(edges, kernel, iterations=2)
-        img_thresh = cv2.erode(img_dilate, kernel, iterations=1)
-
-        contours, _ = cv2.findContours(img_thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        mask = cv2.erode(mask, kernel, iterations=2)  # 깎아내기
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel) # 구멍 메우기
+        
+        # 5. 윤곽선 찾기
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
         if not contours:
-            return None, img_thresh
+            return None, mask
 
         biggest = None
         max_area = 0
+        
+        h, w = frame.shape[:2]
+        screen_area = w * h
 
         for cnt in contours:
             area = cv2.contourArea(cnt)
-            if area < 5000: continue
+            
+            # 노이즈 제거 및 너무 큰(화면 전체가 잡힌 경우) 제외
+            if area < 1000 or area > (screen_area * 0.95):
+                continue
 
+            # 근사화 (사각형 모양 찾기)
             peri = cv2.arcLength(cnt, True)
-            approx = cv2.approxPolyDP(cnt, 0.02 * peri, True)
+            # 0.02는 너무 엄격할 수 있으므로 0.03~0.04로 살짝 완화해도 좋음
+            approx = cv2.approxPolyDP(cnt, 0.03 * peri, True) 
 
+            # 점이 4개(사각형)이고 가장 큰 영역을 찾음
+            # (점이 4개가 안 나오면 사각형이 아니라고 판단하고 넘어감)
             if len(approx) == 4 and area > max_area:
                 biggest = approx
                 max_area = area
 
         if biggest is None:
-            return None, img_thresh
+            return None, mask
 
-        # 좌표 정렬 (TL, TR, BR, BL)
+        # 좌표 정렬 로직
         pts = biggest.reshape(4, 2).astype(np.float32)
         s = pts.sum(axis=1)
         diff = np.diff(pts, axis=1).reshape(-1)
@@ -57,7 +74,9 @@ class Detector:
         bl = pts[np.argmax(diff)]
 
         corners = np.array([tl, tr, br, bl], dtype=np.float32).reshape(-1, 1, 2)
-        return corners, img_thresh
+        return corners, mask
+
+
 
     def warp_perspective(self, frame, corners, width, height):
         if corners is None: return None

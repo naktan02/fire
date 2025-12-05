@@ -1,128 +1,110 @@
 import cv2
 import numpy as np
+
+# 분리된 모듈들 import
 from camera import Camera
 from detector import Detector
 from map import GridMap
+from navigator import Navigator   # [New] 방향 계산
+from server import EvacuationServer # [New] 웹 서버
 
-# === 설정 영역 (CONFIGURATION) ===
-MAP_WIDTH = 860
-MAP_HEIGHT = 520
+# === 설정 ===
+MAP_WIDTH = 640
+MAP_HEIGHT = 480
 GRID_SIZE = 20
 
-# 2단계에서 얻은 좌표를 여기에 붙여넣으세요
-# 예: FIXED_DOT_POSITIONS = [(123, 456), (50, 50)]
+# 1개의 도트만 테스트한다고 가정 (혹은 여러 개)
 FIXED_DOT_POSITIONS = [
+    (100, 200) # ID 0
 ]
 FIXED_EXIT_POSITIONS = [
+    (600, 50)
 ]
-def main():
-    # [수정됨] 라즈베리파이 MJPG-Streamer 주소 입력
-    # 주의: 뒤에 /?action=stream 까지 정확히 적어야 함
-    STREAM_URL = "http://10.8.0.2:8080/?action=stream"
 
+def main():
+    # 1. 모듈 초기화
     try:
-        print(f"Connecting to {STREAM_URL}...")
-        cam = Camera(STREAM_URL) 
+        cam = Camera(1) # 혹은 스트림 URL
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"Camera Error: {e}")
         return
 
     detector = Detector()
-    # 맵 객체는 Warp가 성공했을 때 초기화됩니다.
     grid_map = GridMap(MAP_WIDTH, MAP_HEIGHT, GRID_SIZE)
-    last_valid_corners = None
+    navigator = Navigator()      # 방향 계산기 생성
+    server = EvacuationServer()  # 서버 생성
     
-    print("=== Fire Evacuation System Started ===")
-    print(f"Target Nodes: {len(FIXED_DOT_POSITIONS)}")
+    # 2. 서버 시작 (백그라운드)
+    server.start()
 
+    wall_locked = False
+    locked_wall_mask = None
+
+    print("=== System Started ===")
+    
     while True:
         ret, frame = cam.get_frame()
         if not ret: break
         
-        # 원활한 처리를 위해 해상도 고정
-        frame = cv2.resize(frame, (640, 480))
-        display_frame = frame.copy()
+        # 화면 준비
+        frame = cv2.resize(frame, (MAP_WIDTH, MAP_HEIGHT))
+        analysis_map = frame.copy()
 
-        # 1. 맵 외곽선(종이 테두리) 인식
-        corners, _ = detector.detect_corners(frame)
-        if corners is not None:
-            area = cv2.contourArea(corners)
-            if area > (frame.shape[0]*frame.shape[1] * 0.1): # 화면의 10% 이상일 때만
-                last_valid_corners = corners
-
-        # 2. 맵 투시 변환 (Top-down View)
-        warped_map = None
-        if last_valid_corners is not None:
-            warped_map = detector.warp_perspective(frame, last_valid_corners, MAP_WIDTH, MAP_HEIGHT)
+        # [A] 맵 & 벽 업데이트
+        grid_map.reset()
+        current_wall_mask = None
         
-        if warped_map is not None:
-            # === [핵심 로직] 맵 분석 및 경로 계산 ===
+        if wall_locked and locked_wall_mask is not None:
+            current_wall_mask = locked_wall_mask
+            cv2.putText(analysis_map, "LOCKED", (10,30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,0,255), 2)
+        else:
+            current_wall_mask = detector.detect_walls_in_map(analysis_map)
+            cv2.putText(analysis_map, "Scanning...", (10,30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,0), 2)
             
-            # (A) 맵 초기화
-            grid_map.reset()
-            
-            # (B) 내부 흰색 벽 인식 -> 장애물 등록
-            wall_mask = detector.detect_walls_in_map(warped_map)
-            grid_map.update_obstacles_from_mask(wall_mask)
-            
-            # (C) 불(양초) 인식 -> 장애물 등록
-            fire_boxes, fire_mask = detector.detect_fire(warped_map)
-            for (fx, fy, fw, fh) in fire_boxes:
-                # 불 주변을 넉넉하게 위험지역으로 설정 (안전 마진)
-                grid_map.set_obstacle_rect(fx-10, fy-10, fw+20, fh+20)
+        if current_wall_mask is not None:
+            grid_map.update_obstacles_from_mask(current_wall_mask)
+
+        # [B] 불 감지
+        fire_boxes, _ = detector.detect_fire(analysis_map)
+        is_fire = (len(fire_boxes) > 0)
+        
+        for (fx, fy, fw, fh) in fire_boxes:
+            grid_map.set_obstacle_rect(fx-20, fy-20, fw+40, fh+40)
+            cv2.rectangle(analysis_map, (fx, fy), (fx+fw, fy+fh), (0,0,255), 2)
+
+        # [C] 탈출구 등록
+        for ex, ey in FIXED_EXIT_POSITIONS:
+            grid_map.add_exit(ex, ey, 20, 20)
+            cv2.circle(analysis_map, (ex, ey), 8, (255,255,255), -1)
+
+        # [D] 도트 경로 및 방향 계산 (Navigator 위임)
+        current_directions = {}
+        
+        for i, (dx, dy) in enumerate(FIXED_DOT_POSITIONS):
+            path = grid_map.get_shortest_path(dx, dy)
+            direction = "STOP"
+
+            if len(path) > 1:
+                # [핵심] Navigator가 대각선 포함해서 방향 알려줌
+                direction = navigator.get_direction((dx, dy), path[1])
+                
                 # 시각화
-                cv2.rectangle(warped_map, (fx, fy), (fx+fw, fy+fh), (0, 0, 255), 2)
-                cv2.putText(warped_map, "FIRE", (fx, fy-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,255), 2)
+                cv2.polylines(analysis_map, [np.array(path)], False, (255,0,0), 2)
+                cv2.putText(analysis_map, direction, (dx, dy-20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,255), 2)
+            
+            current_directions[i] = direction
+            cv2.circle(analysis_map, (dx, dy), 5, (0,255,255), -1)
 
-            # (D) 탈출구 처리
-            # grid_map.reset()에서 이미 self.exits는 비워진 상태라고 가정
-            for (ex, ey) in FIXED_EXIT_POSITIONS:
-                w, h = 40, 40
-                grid_map.add_exit(ex - w/2, ey - h/2, w, h)
+        # [E] 서버에 데이터 업데이트
+        server.update_data(is_fire, current_directions)
 
-                cv2.circle(warped_map, (ex, ey), 10, (0, 0, 0), -1)
-                cv2.putText(
-                    warped_map, "EXIT",
-                    (ex - 20, ey - 15),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5,
-                    (255, 255, 255), 1
-                )
-
-            # (E) 각 도트 매트릭스 위치별 최단 경로 계산
-            # 디버깅용 그리드 그리기 (장애물 확인)
-            # grid_map.draw_grid(warped_map) 
-
-            for i, (dm_x, dm_y) in enumerate(FIXED_DOT_POSITIONS):
-                # 위치 표시
-                cv2.circle(warped_map, (dm_x, dm_y), 5, (255, 255, 0), -1)
-                
-                # 경로 계산
-                path = grid_map.get_shortest_path(dm_x, dm_y)
-                
-                if len(path) > 1:
-                    # 경로 그리기 (파란색)
-                    cv2.polylines(warped_map, [np.array(path)], False, (255, 0, 0), 2)
-                    
-                    # 방향 화살표 (현재 위치에서 경로의 10% 지점 혹은 3번째 점을 향하도록)
-                    lookahead_idx = min(3, len(path)-1)
-                    target_pt = path[lookahead_idx]
-                    
-                    cv2.arrowedLine(warped_map, (dm_x, dm_y), target_pt, (0, 255, 255), 3, tipLength=0.3)
-                else:
-                    # 갈 수 없음 (고립됨)
-                    cv2.putText(warped_map, "X", (dm_x, dm_y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,255), 1)
-
-            # 결과 화면 출력
-            cv2.imshow("Smart Evacuation Map", warped_map)
-
-        # 원본 화면도 같이 표시 (카메라 조정용)
-        if last_valid_corners is not None:
-            cv2.polylines(display_frame, [last_valid_corners.astype(int)], True, (0, 255, 255), 2)
-        cv2.imshow("Original Camera", display_frame)
-
+        # 화면 출력
+        cv2.imshow("System", analysis_map)
         key = cv2.waitKey(1) & 0xFF
-        if key == ord('q'):
-            break
+        if key == ord('q'): break
+        elif key == ord('c'):
+            wall_locked = not wall_locked
+            locked_wall_mask = current_wall_mask.copy() if wall_locked and current_wall_mask is not None else None
 
     cam.release()
     cv2.destroyAllWindows()
