@@ -30,21 +30,12 @@ class Navigator:
         # === 8방향 판별 (45도 섹터 나누기) ===
         # 0도(Right), 45도(Up-Right), 90도(Up), 135도(Up-Left)...
         
-        if (0 <= angle < 22.5) or (337.5 <= angle <= 360):
+        if (0 <= angle < 25) or (337.5 <= angle <= 360):
             return "RIGHT"
-        elif 22.5 <= angle < 67.5:
-            return "UP-RIGHT"  # [요청하신 오른쪽 대각선]
-        elif 67.5 <= angle < 157.5:
+        elif 25 <= angle < 157.5:
             return "UP"
-        # elif 112.5 <= angle < 157.5:
-        #     return "UP-LEFT"
         elif 157.5 <= angle < 202.5:
             return "LEFT"
-        elif 202.5 <= angle < 247.5:
-            return "DOWN-LEFT"
-        elif 247.5 <= angle < 292.5:
+        elif 202.5 <= angle < 292.5:
             return "DOWN"
-        elif 292.5 <= angle < 337.5:
-            return "DOWN-RIGHT"
-            
         return "STOP"

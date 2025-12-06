@@ -25,7 +25,7 @@ def mouse_callback(event, x, y, flags, param):
     param['img'] = img
 
 def main():
-    STREAM_URL = "http://10.8.0.3:8080/?action=stream"
+    STREAM_URL = "http://10.8.0.6:8080/?action=stream"
     # STREAM_URL = 1
     
     try:

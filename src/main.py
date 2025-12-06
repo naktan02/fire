@@ -15,22 +15,22 @@ GRID_SIZE = 20
 
 # 1개의 도트만 테스트한다고 가정 (혹은 여러 개)
 FIXED_DOT_POSITIONS = [
-   (69, 397),
-   (321, 270),
-   (314, 81),
-   (589, 204),
-   (599, 398)
+(548, 55),
+(288, 360),
+(286, 193),
+(29, 195),
+
 ]
 FIXED_EXIT_POSITIONS = [
-    (70, 80),
-    (347, 400),
-    (608, 50)
+    (28, 366),
+    (560, 361),
+    (290, 19)
 ]
 
 def main():
     # 1. 모듈 초기화
     try:
-        STREAM_URL = "http://10.8.0.3:8080/?action=stream"
+        STREAM_URL = "http://10.8.0.6:8080/?action=stream"
         # STREAM_URL = 1  # 테스트용 로컬 카메라
         print(f"Connecting to {STREAM_URL}...")
         cam = Camera(STREAM_URL)
